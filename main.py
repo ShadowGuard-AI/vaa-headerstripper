@@ -14,12 +14,12 @@ def setup_argparse():
     Returns:
         argparse.ArgumentParser: The argument parser object.
     """
-    parser = argparse.ArgumentParser(description='vaa-HeaderStripper: Removes sensitive information from HTTP response headers.')
+    parser = argparse.ArgumentParser(description='vaa-HeaderStripper: Reports what a response header listing would look like with named headers removed from the listing. Nothing is removed from the target server or its responses.')
     parser.add_argument('url', help='The target URL to scan.')
-    # Naming even one header with -H replaces this default list wholesale, it does not extend it. An operator who adds a custom header and forgets the defaults silently stops stripping Server, which is the header most runs exist to remove.
     parser.add_argument('-H', '--headers', nargs='+', default=['Server', 'X-Powered-By', 'X-AspNet-Version'],
                         help='A list of headers to strip. Defaults to Server, X-Powered-By, and X-AspNet-Version.')
-    parser.add_argument('-o', '--output', help='Output file to save sanitized headers.', default=None)
+    parser.add_argument('-o', '--output', help='Output file to save the header listing. An existing file is not overwritten unless --force is given.', default=None)
+    parser.add_argument('--force', action='store_true', help='Allow -o to overwrite an existing file.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output for debugging.')
     return parser
 
@@ -51,11 +51,10 @@ def fetch_headers(url):
         None: If there is an error fetching the headers.
     """
     try:
-        # Streaming with no body read and no close leaves the connection hanging on the response object until garbage collection. I only ever want the headers, but a HEAD request would have said so to the server; some servers answer GET and HEAD with different header sets, which is the tradeoff I accepted without noting it until now.
-        response = requests.get(url, stream=True, timeout=10)  # Added timeout
-        # An error status makes me discard the response entirely, headers included. A 404 page still carries a Server header worth stripping, but my run exits 1 in main and the operator sees nothing of it.
-        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-        return response.headers
+        with requests.get(url, stream=True, timeout=10) as response:
+            logging.info(f"Response status: {response.status_code}")
+            print(f"Status: {response.status_code}")
+            return dict(response.headers)
     except requests.exceptions.RequestException as e:
         logging.error(f"Error fetching headers from {url}: {e}")
         return None
@@ -71,15 +70,23 @@ def sanitize_headers(headers, headers_to_strip):
     Returns:
         dict: A new dictionary with the specified headers removed.
     """
-    # Everything I strip is stripped from this local copy. The server keeps sending the real headers to everyone else; my output is a filtered view for a report or a proxy config, and anyone reading the tool name as a server side change is giving it credit it has not earned.
-    sanitized_headers = headers.copy()
+    sanitized_headers = dict(headers)
     for header in headers_to_strip:
-        if header in sanitized_headers:
-            del sanitized_headers[header]
-            logging.info(f"Stripped header: {header}")
+        for key in list(sanitized_headers):
+            if key.lower() == header.lower():
+                del sanitized_headers[key]
+                logging.info(f"Removed from listing: {header}")
     return sanitized_headers
 
-def save_headers_to_file(headers, filename):
+CREDENTIAL_HEADERS = {"set-cookie", "authorization", "cookie", "x-api-key", "x-custom-auth", "proxy-authorization"}
+
+def display_value(name, value):
+    lowered = name.lower()
+    if lowered in CREDENTIAL_HEADERS or "auth" in lowered or "cookie" in lowered or "api-key" in lowered or "token" in lowered:
+        return "[REDACTED]"
+    return value
+
+def save_headers_to_file(headers, filename, force=False):
     """
     Saves the headers to a file.
 
@@ -87,14 +94,19 @@ def save_headers_to_file(headers, filename):
         headers (dict): The dictionary of headers to save.
         filename (str): The name of the file to save the headers to.
     """
+    import os
+    if os.path.exists(filename) and not force:
+        logging.error(f"Output file already exists and will not be overwritten without --force: {filename}")
+        return False
     try:
         with open(filename, 'w') as f:
             for key, value in headers.items():
-                f.write(f"{key}: {value}\n")
+                f.write(f"{key}: {display_value(key, value)}\n")
         logging.info(f"Headers saved to file: {filename}")
-    # As with the fetch path, a failed save only reaches the log. The sanitized list has already printed, the exit code stays 0, and the missing file is discoverable only by looking for it.
+        return True
     except IOError as e:
         logging.error(f"Error saving headers to file {filename}: {e}")
+        return False
 
 def main():
     """
@@ -119,12 +131,13 @@ def main():
 
     sanitized_headers = sanitize_headers(headers, args.headers)
 
-    print("\nSanitized Headers:")
+    print("\nHeaders with named headers removed from this listing (the target still sends them):")
     for key, value in sanitized_headers.items():
-        print(f"{key}: {value}")
+        print(f"{key}: {display_value(key, value)}")
 
     if args.output:
-        save_headers_to_file(sanitized_headers, args.output)
+        if not save_headers_to_file(sanitized_headers, args.output, force=args.force):
+            sys.exit(1)
 
 
 if __name__ == "__main__":
