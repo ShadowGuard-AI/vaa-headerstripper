@@ -16,6 +16,7 @@ def setup_argparse():
     """
     parser = argparse.ArgumentParser(description='vaa-HeaderStripper: Removes sensitive information from HTTP response headers.')
     parser.add_argument('url', help='The target URL to scan.')
+    # Naming even one header with -H replaces this default list wholesale, it does not extend it. An operator who adds a custom header and forgets the defaults silently stops stripping Server, which is the header most runs exist to remove.
     parser.add_argument('-H', '--headers', nargs='+', default=['Server', 'X-Powered-By', 'X-AspNet-Version'],
                         help='A list of headers to strip. Defaults to Server, X-Powered-By, and X-AspNet-Version.')
     parser.add_argument('-o', '--output', help='Output file to save sanitized headers.', default=None)
@@ -50,7 +51,9 @@ def fetch_headers(url):
         None: If there is an error fetching the headers.
     """
     try:
+        # Streaming with no body read and no close leaves the connection hanging on the response object until garbage collection. I only ever want the headers, but a HEAD request would have said so to the server; some servers answer GET and HEAD with different header sets, which is the tradeoff I accepted without noting it until now.
         response = requests.get(url, stream=True, timeout=10)  # Added timeout
+        # An error status makes me discard the response entirely, headers included. A 404 page still carries a Server header worth stripping, but my run exits 1 in main and the operator sees nothing of it.
         response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
         return response.headers
     except requests.exceptions.RequestException as e:
@@ -68,6 +71,7 @@ def sanitize_headers(headers, headers_to_strip):
     Returns:
         dict: A new dictionary with the specified headers removed.
     """
+    # Everything I strip is stripped from this local copy. The server keeps sending the real headers to everyone else; my output is a filtered view for a report or a proxy config, and anyone reading the tool name as a server side change is giving it credit it has not earned.
     sanitized_headers = headers.copy()
     for header in headers_to_strip:
         if header in sanitized_headers:
@@ -88,6 +92,7 @@ def save_headers_to_file(headers, filename):
             for key, value in headers.items():
                 f.write(f"{key}: {value}\n")
         logging.info(f"Headers saved to file: {filename}")
+    # As with the fetch path, a failed save only reaches the log. The sanitized list has already printed, the exit code stays 0, and the missing file is discoverable only by looking for it.
     except IOError as e:
         logging.error(f"Error saving headers to file {filename}: {e}")
 
